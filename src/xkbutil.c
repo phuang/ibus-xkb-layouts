@@ -27,21 +27,20 @@ ibus_xkb_engine_new (gchar    *layout,
         engine_layout = g_strdup_printf ("%s(%s)", layout, variant);
     }
 
-    engine = ibus_engine_desc_new (engine_name,
-                                   engine_longname ? engine_longname : layout_desc,
-                                   "",
-                                   language,
-                                   "",
-                                   "",
-                                   "",
-                                   engine_layout ? engine_layout : layout);
-
-    /* set default rank to 0 */
-    engine->rank = 0;
+    guint rank = 0;
 
     if (g_strcmp0(layout, "us") == 0 && (!variant || !*variant)) {
-        engine->rank = 100;
+        rank = 100;
     }
+
+
+    engine = ibus_engine_desc_new_varargs (
+            "name", engine_name,
+            "longname", engine_longname ? engine_longname : layout_desc,
+            "language", language,
+            "layout", engine_layout ? engine_layout : layout,
+            "rank", rank,
+            NULL);
 
     g_free (engine_name);
     g_free (engine_longname);
