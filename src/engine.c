@@ -2,9 +2,10 @@
 /* vim:set et sts=4: */
 #include "engine.h"
 
+/* TODO Add ibus_keyval_to_unicode and ibus_unicode_to_keyval on libibus */
 #include "ibuskeyuni.h"
 
-#define MAX_COMPOSE 7
+#define MAX_COMPOSE_LEN 7
 
 typedef struct _IBusXkbLayoutEngine IBusXkbLayoutEngine;
 typedef struct _IBusXkbLayoutEngineClass IBusXkbLayoutEngineClass;
@@ -12,7 +13,7 @@ typedef struct _IBusXkbLayoutEngineClass IBusXkbLayoutEngineClass;
 struct _IBusXkbLayoutEngine {
     IBusEngine parent;
 
-    guint      compose_buffer[MAX_COMPOSE + 1];
+    guint      compose_buffer[MAX_COMPOSE_LEN + 1];
     gunichar   tentative_match;
     gint       tentative_match_len;
 
@@ -88,6 +89,10 @@ static gboolean ibus_xkb_layout_engine_process_key_event(IBusEngine             
                                                          guint                       keyval,
                                                          guint                       keycode,
                                                          guint                       modifiers);
+static void     ibus_xkb_layout_engine_commit_char      (IBusXkbLayoutEngine        *xkbengine,
+                                                         gunichar                    ch);
+static void     ibus_xkb_layout_engine_update_preedit_text
+                                                        (IBusXkbLayoutEngine        *xkbengine);
 
 G_DEFINE_TYPE (IBusXkbLayoutEngine, ibus_xkb_layout_engine, IBUS_TYPE_ENGINE)
 
@@ -129,9 +134,26 @@ ibus_xkb_layout_engine_reset (IBusEngine *engine)
 }
 
 static void
-ibus_xkb_layout_engine_update_preedit_text (IBusXkbLayoutEngine   *xkbengine)
+ibus_xkb_layout_engine_commit_char (IBusXkbLayoutEngine *xkbengine,
+                                    gunichar             ch)
 {
-    gunichar outbuf[MAX_COMPOSE + 2]; /* up to 6 hex digits */
+    g_return_if_fail (g_unichar_validate (ch));
+
+    if (xkbengine->tentative_match || xkbengine->in_hex_sequence) {
+        xkbengine->in_hex_sequence = FALSE;
+        xkbengine->tentative_match = 0;
+        xkbengine->tentative_match_len = 0;
+        ibus_xkb_layout_engine_update_preedit_text (xkbengine);
+    }
+
+    ibus_engine_commit_text ((IBusEngine *)xkbengine,
+            ibus_text_new_from_unichar (ch));
+}
+
+static void
+ibus_xkb_layout_engine_update_preedit_text (IBusXkbLayoutEngine *xkbengine)
+{
+    gunichar outbuf[MAX_COMPOSE_LEN + 2]; /* up to 6 hex digits */
     int len = 0;
 
     if (xkbengine->in_hex_sequence) {
@@ -145,7 +167,7 @@ ibus_xkb_layout_engine_update_preedit_text (IBusXkbLayoutEngine   *xkbengine)
             ++ len;
             ++hexchars;
         }
-        g_assert (len < MAX_COMPOSE + 1);
+        g_assert (len <= MAX_COMPOSE_LEN + 1);
     }
     else if (xkbengine->tentative_match)
         outbuf[len++] = xkbengine->tentative_match;
@@ -158,6 +180,7 @@ ibus_xkb_layout_engine_update_preedit_text (IBusXkbLayoutEngine   *xkbengine)
         IBusText *text = ibus_text_new_from_ucs4 (outbuf);
         ibus_text_append_attribute (text,
                 IBUS_ATTR_TYPE_UNDERLINE, IBUS_ATTR_UNDERLINE_SINGLE, 0, len);
+        g_debug ("UpdatePreedit text=%s", text->text);
         ibus_engine_update_preedit_text ((IBusEngine *)xkbengine, text, len, TRUE);
     }
 }
@@ -329,7 +352,7 @@ check_compact_table (IBusXkbLayoutEngine          *xkbengine,
         gunichar value;
 
         value = seq[row_stride - 1];
-        ibus_engine_commit_text ((IBusEngine *)xkbengine, ibus_text_new_from_unichar (value));
+        ibus_xkb_layout_engine_commit_char (xkbengine, value);
         xkbengine->compose_buffer[0] = 0;
 
         g_debug ("U+%04X\n", value);
@@ -361,22 +384,24 @@ ibus_xkb_layout_engine_process_key_event (IBusEngine *engine,
     while (xkbengine->compose_buffer[n_compose] != 0)
         n_compose++;
 
+    if (n_compose >= MAX_COMPOSE_LEN)
+        return TRUE;
+
     if (modifiers & IBUS_RELEASE_MASK) {
         if (xkbengine->in_hex_sequence &&
             (keyval == IBUS_Control_L || keyval == IBUS_Control_R ||
              keyval == IBUS_Shift_L || keyval == IBUS_Shift_R)) {
             if (xkbengine->tentative_match &&
                 g_unichar_validate (xkbengine->tentative_match)) {
-                ibus_engine_commit_text (
-                      engine,
-                      ibus_text_new_from_unichar (xkbengine->tentative_match));
+                ibus_xkb_layout_engine_commit_char (xkbengine,
+                                                    xkbengine->tentative_match);
             }
             else if (n_compose == 0) {
                 xkbengine->modifiers_dropped = TRUE;
             }
             else {
                 /* invalid hex sequence */
-                /* beep_window (event->window); */
+                /* FIXME beep_window (event->window); */
                 xkbengine->tentative_match = 0;
                 xkbengine->in_hex_sequence = FALSE;
                 xkbengine->compose_buffer[0] = 0;
@@ -451,21 +476,17 @@ ibus_xkb_layout_engine_process_key_event (IBusEngine *engine,
     if (xkbengine->in_hex_sequence && have_hex_mods && is_hex_start) {
         if (xkbengine->tentative_match &&
             g_unichar_validate (xkbengine->tentative_match)) {
-            ibus_engine_commit_text (
-                    engine,
-                    ibus_text_new_from_unichar (xkbengine->tentative_match));
-        xkbengine->compose_buffer[0] = 0;
-    }
+            ibus_xkb_layout_engine_commit_char (xkbengine, xkbengine->tentative_match);
+        }
         else {
-        /* invalid hex sequence */
-        if (n_compose > 0)
-            // FIXME beep_window (event->window);
-                ;
-
-        xkbengine->tentative_match = 0;
-        xkbengine->in_hex_sequence = FALSE;
-        xkbengine->compose_buffer[0] = 0;
-    }
+            /* invalid hex sequence */
+            if (n_compose > 0) {
+                // FIXME beep_window (event->window);
+                xkbengine->tentative_match = 0;
+                xkbengine->in_hex_sequence = FALSE;
+                xkbengine->compose_buffer[0] = 0;
+            }
+        }
     }
 
     /* Check for hex sequence start */
@@ -474,6 +495,8 @@ ibus_xkb_layout_engine_process_key_event (IBusEngine *engine,
         xkbengine->in_hex_sequence = TRUE;
         xkbengine->modifiers_dropped = FALSE;
         xkbengine->tentative_match = 0;
+
+        g_debug ("Start HEX MODE");
 
         ibus_xkb_layout_engine_update_preedit_text (xkbengine);
 
@@ -486,18 +509,16 @@ ibus_xkb_layout_engine_process_key_event (IBusEngine *engine,
             xkbengine->compose_buffer[n_compose++] = hex_keyval;
         else if (is_escape) {
             // FIXME
-        ibus_xkb_layout_engine_reset (engine);
+            ibus_xkb_layout_engine_reset (engine);
 
-        return TRUE;
-    }
+            return TRUE;
+        }
         else if (!is_hex_end) {
-          // FIXME
-      /* non-hex character in hex sequence */
-      // beep_window (event->window);
-          ;
-
-      return TRUE;
-    }
+            // FIXME
+            /* non-hex character in hex sequence */
+            // beep_window (event->window);
+            return TRUE;
+        }
     }
     else
         xkbengine->compose_buffer[n_compose++] = keyval;
@@ -509,25 +530,24 @@ ibus_xkb_layout_engine_process_key_event (IBusEngine *engine,
         if (have_hex_mods) {
             /* space or return ends the sequence, and we eat the key */
             if (n_compose > 0 && is_hex_end) {
-            if (xkbengine->tentative_match &&
-            g_unichar_validate (xkbengine->tentative_match)) {
-                    ibus_engine_commit_text (
-                            engine,
-                            ibus_text_new_from_unichar (xkbengine->tentative_match));
-            xkbengine->compose_buffer[0] = 0;
-        }
-            else {
+                if (xkbengine->tentative_match &&
+                    g_unichar_validate (xkbengine->tentative_match)) {
+                    ibus_xkb_layout_engine_commit_char (xkbengine,
+                            xkbengine->tentative_match);
+                    xkbengine->compose_buffer[0] = 0;
+                }
+                else {
                     // FIXME
-            /* invalid hex sequence */
-            // beep_window (event->window);
+                    /* invalid hex sequence */
+                    // beep_window (event->window);
                     xkbengine->tentative_match = 0;
                     xkbengine->in_hex_sequence = FALSE;
                     xkbengine->compose_buffer[0] = 0;
-        }
+                }
             }
             else if (!check_hex (xkbengine, n_compose))
                 // FIXME
-            // beep_window (event->window);
+                // beep_window (event->window);
                 ;
             ibus_xkb_layout_engine_update_preedit_text (xkbengine);
 
