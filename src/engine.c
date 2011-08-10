@@ -105,7 +105,255 @@ ibus_xkb_layout_engine_destroy (IBusXkbLayoutEngine *xkb_layout)
     ((IBusObjectClass *) ibus_xkb_layout_engine_parent_class)->destroy ((IBusObject *)xkb_layout);
 }
 
+static void     
+gtk_im_context_simple_get_preedit_string (IBusXkbLayoutEngine   *xkbengine,
+					  gchar                **str,
+					  PangoAttrList        **attrs,
+					  gint                  *cursor_pos)
+{
+  GtkIMContextSimple *context_simple = GTK_IM_CONTEXT_SIMPLE (context);
+  GtkIMContextSimplePrivate *priv = context_simple->priv;
+  char outbuf[37]; /* up to 6 hex digits */
+  int len = 0;
+
+  if (priv->in_hex_sequence)
+    {
+      int hexchars = 0;
+         
+      outbuf[0] = 'u';
+      len = 1;
+
+      while (priv->compose_buffer[hexchars] != 0)
+	{
+	  len += g_unichar_to_utf8 (gdk_keyval_to_unicode (priv->compose_buffer[hexchars]),
+				    outbuf + len);
+	  ++hexchars;
+	}
+
+      g_assert (len < 25);
+    }
+  else if (priv->tentative_match)
+    len = g_unichar_to_utf8 (priv->tentative_match, outbuf);
+      
+  outbuf[len] = '\0';      
+
+  if (str)
+    *str = g_strdup (outbuf);
+
+  if (attrs)
+    {
+      *attrs = pango_attr_list_new ();
+      
+      if (len)
+	{
+	  PangoAttribute *attr = pango_attr_underline_new (PANGO_UNDERLINE_SINGLE);
+	  attr->start_index = 0;
+          attr->end_index = len;
+	  pango_attr_list_insert (*attrs, attr);
+	}
+    }
+
+  if (cursor_pos)
+    *cursor_pos = len;
+}
+
+
+/* In addition to the table-driven sequences, we allow Unicode hex
+ * codes to be entered. The method chosen here is similar to the
+ * one recommended in ISO 14755, but not exactly the same, since we
+ * don't want to steal 16 valuable key combinations. 
+ * 
+ * A hex Unicode sequence must be started with Ctrl-Shift-U, followed
+ * by a sequence of hex digits entered with Ctrl-Shift still held.
+ * Releasing one of the modifiers or pressing space while the modifiers
+ * are still held commits the character. It is possible to erase
+ * digits using backspace.
+ *
+ * As an extension to the above, we also allow to start the sequence
+ * with Ctrl-Shift-U, then release the modifiers before typing any
+ * digits, and enter the digits without modifiers.
+ */
 #define HEX_MOD_MASK (IBUS_CONTROL_MASK | IBUS_SHIFT_MASK)
+
+static gboolean
+check_hex (IBusXkbLayoutEngine *xkbengine,
+           gint                 n_compose)
+{
+  gint i;
+  GString *str;
+  gulong n;
+  gchar *nptr = NULL;
+  gchar buf[7];
+
+  xkbengine->tentative_match = 0;
+  xkbengine->tentative_match_len = 0;
+
+  str = g_string_new (NULL);
+  
+  i = 0;
+  while (i < n_compose)
+    {
+      gunichar ch;
+      
+      ch = gdk_keyval_to_unicode (xkbengine->compose_buffer[i]);
+      
+      if (ch == 0)
+        return FALSE;
+
+      if (!g_unichar_isxdigit (ch))
+        return FALSE;
+
+      buf[g_unichar_to_utf8 (ch, buf)] = '\0';
+
+      g_string_append (str, buf);
+      
+      ++i;
+    }
+
+  n = strtoul (str->str, &nptr, 16);
+
+  /* if strtoul fails it probably means non-latin digits were used;
+   * we should in principle handle that, but we probably don't.
+   */
+  if (nptr - str->str < str->len)
+    {
+      g_string_free (str, TRUE);
+      return FALSE;
+    }
+  else
+    g_string_free (str, TRUE);
+
+  if (g_unichar_validate (n))
+    {
+      xkbengine->tentative_match = n;
+      xkbengine->tentative_match_len = n_compose;
+    }
+  
+  return TRUE;
+}
+
+static int
+compare_seq_index (const void *key, const void *value)
+{
+  const guint *keysyms = key;
+  const guint16 *seq = value;
+
+  if (keysyms[0] < seq[0])
+    return -1;
+  else if (keysyms[0] > seq[0])
+    return 1;
+
+  return 0;
+}
+
+static int
+compare_seq (const void *key, const void *value)
+{
+  int i = 0;
+  const guint *keysyms = key;
+  const guint16 *seq = value;
+
+  while (keysyms[i])
+    {
+      if (keysyms[i] < seq[i])
+	return -1;
+      else if (keysyms[i] > seq[i])
+	return 1;
+
+      i++;
+    }
+
+  return 0;
+}
+
+
+static gboolean
+check_compact_table (IBusXkbLayoutEngine          *xkbengine,
+	                 const GtkComposeTableCompact *table,
+	                 gint                          n_compose)
+{
+  gint row_stride;
+  guint16 *seq_index;
+  guint16 *seq; 
+  gint i;
+
+  /* Will never match, if the sequence in the compose buffer is longer
+   * than the sequences in the table.  Further, compare_seq (key, val)
+   * will overrun val if key is longer than val. */
+  if (n_compose > table->max_seq_len)
+    return FALSE;
+
+  seq_index = (guint16 *) bsearch (xkbengine->compose_buffer,
+                    table->data, table->n_index_size,
+		            sizeof (guint16) *  table->n_index_stride, 
+		       compare_seq_index);
+
+  if (!seq_index)
+    {
+      g_debug ("compact: no\n");
+      return FALSE;
+    }
+
+  if (seq_index && n_compose == 1)
+    {
+      g_debug ("compact: yes\n");
+      return TRUE;
+    }
+
+  g_debug ("compact: %d ", *seq_index);
+  seq = NULL;
+
+  for (i = n_compose-1; i < table->max_seq_len; i++)
+    {
+      row_stride = i + 1;
+
+      if (seq_index[i+1] - seq_index[i] > 0)
+        {
+	  seq = (guint16 *) bsearch (xkbengine->compose_buffer + 1,
+		 table->data + seq_index[i], (seq_index[i+1] - seq_index[i]) / row_stride,
+		 sizeof (guint16) *  row_stride, 
+		 compare_seq);
+
+	  if (seq)
+            {
+              if (i == n_compose - 1)
+                break;
+              else
+                {
+                  g_signal_emit_by_name (context_simple, "preedit-changed");
+
+		          g_debug ("yes\n");
+      		      return TRUE;
+                }
+             }
+        }
+    }
+
+  if (!seq)
+    {
+      g_debug ("no\n");
+      return FALSE;
+    }
+  else
+    {
+      gunichar value;
+
+      value = seq[row_stride - 1];
+
+      gtk_im_context_simple_commit_char (GTK_IM_CONTEXT (context_simple), value);
+#ifdef G_OS_WIN32
+      check_win32_special_case_after_compact_match (context_simple, n_compose, value);
+#endif
+      xkbengine->compose_buffer[0] = 0;
+
+      g_debug ("U+%04X\n", value);
+      return TRUE;
+    }
+
+  g_debug ("no\n");
+  return FALSE;
+}
+
 
 gboolean
 ibus_xkb_layout_engine_process_key_event (IBusEngine *engine,
@@ -295,7 +543,7 @@ ibus_xkb_layout_engine_process_key_event (IBusEngine *engine,
                     xkbengine->compose_buffer[0] = 0;
 		}
             }
-            else if (!check_hex (context_simple, n_compose))
+            else if (!check_hex (xkbengine, n_compose))
                 // FIXME
 	        // beep_window (event->window);
                 ;
