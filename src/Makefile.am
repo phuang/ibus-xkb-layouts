@@ -42,7 +42,7 @@ xkb-layouts.xml: xkb-layouts.xml.in
 		eval "echo \"$${s}\""; \
 	) > $@
 
-gtkimcontextsimpleseqs.h: compose-parse.py
-	$(AM_V_GEN) \
-	./compose-parse.py --gtk | sed 's/GDK_KEY_/IBUS_/g' > $@ || \
-	( rm -rf $@ ; exit 1 )
+# gtkimcontextsimpleseqs.h: compose-parse.py
+# 	$(AM_V_GEN) \
+# 	./compose-parse.py --gtk | sed 's/GDK_KEY_/IBUS_/g' > $@ || \
+# 	( rm -rf $@ ; exit 1 )
