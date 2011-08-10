@@ -15,9 +15,9 @@ static gboolean verbose = FALSE;
 
 static const GOptionEntry entries[] =
 {
-    { "xml", 'x', 0, G_OPTION_ARG_NONE, &xml, "generate xml for engines", NULL },
-    { "ibus", 'i', 0, G_OPTION_ARG_NONE, &ibus, "component is executed by ibus", NULL },
-    { "verbose", 'v', 0, G_OPTION_ARG_NONE, &verbose, "verbose", NULL },
+    { "xml",      'x', 0, G_OPTION_ARG_NONE,    &xml,       "generate xml for engines", NULL },
+    { "ibus",     'i', 0, G_OPTION_ARG_NONE,    &ibus,      "component is executed by ibus", NULL },
+    { "verbose",  'v', 0, G_OPTION_ARG_NONE,    &verbose,   "verbose", NULL },
     { NULL },
 };
 

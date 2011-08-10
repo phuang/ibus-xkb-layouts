@@ -6,6 +6,8 @@ ibus_engine_xkb_layouts_SOURCES = \
 	engine.h \
 	xkbutil.c \
 	xkbutil.h \
+	ibuskeyuni.c \
+	ibuskeyuni.h \
 	gtkimcontextsimpleseqs.h \
 	$(NULL)
 ibus_engine_xkb_layouts_CPPFLAGS = \
