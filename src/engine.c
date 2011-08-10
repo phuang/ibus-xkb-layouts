@@ -1,7 +1,7 @@
 /* -*- mode: C; c-basic-offset: 4; indent-tabs-mode: nil; -*- */
 /* vim:set et sts=4: */
 #include "engine.h"
-
+#include <stdlib.h>
 /* TODO Add ibus_keyval_to_unicode and ibus_unicode_to_keyval on libibus */
 #include "ibuskeyuni.h"
 
@@ -153,7 +153,7 @@ ibus_xkb_layout_engine_commit_char (IBusXkbLayoutEngine *xkbengine,
 static void
 ibus_xkb_layout_engine_update_preedit_text (IBusXkbLayoutEngine *xkbengine)
 {
-    gunichar outbuf[MAX_COMPOSE_LEN + 2]; /* up to 6 hex digits */
+    gunichar outbuf[MAX_COMPOSE_LEN + 2];
     int len = 0;
 
     if (xkbengine->in_hex_sequence) {
@@ -164,7 +164,7 @@ ibus_xkb_layout_engine_update_preedit_text (IBusXkbLayoutEngine *xkbengine)
 
         while (xkbengine->compose_buffer[hexchars] != 0) {
             outbuf[len] = ibus_keyval_to_unicode (xkbengine->compose_buffer[hexchars]);
-            ++ len;
+            ++len;
             ++hexchars;
         }
         g_assert (len <= MAX_COMPOSE_LEN + 1);
@@ -305,10 +305,18 @@ check_compact_table (IBusXkbLayoutEngine          *xkbengine,
     if (n_compose > table->max_seq_len)
         return FALSE;
 
-    seq_index = (guint16 *) bsearch (xkbengine->compose_buffer,
-            table->data, table->n_index_size,
-            sizeof (guint16) *  table->n_index_stride,
-            compare_seq_index);
+    g_debug ("check_compact_table(%d) [%04x, %04x, %04x, %04x]",
+        n_compose,
+        xkbengine->compose_buffer[0],
+        xkbengine->compose_buffer[1],
+        xkbengine->compose_buffer[2],
+        xkbengine->compose_buffer[3]);
+
+    seq_index = bsearch (xkbengine->compose_buffer,
+                         table->data,
+                         table->n_index_size,
+                         sizeof (guint16) *  table->n_index_stride,
+                         compare_seq_index);
 
     if (!seq_index) {
         g_debug ("compact: no\n");
@@ -323,22 +331,23 @@ check_compact_table (IBusXkbLayoutEngine          *xkbengine,
     g_debug ("compact: %d ", *seq_index);
     seq = NULL;
 
-    for (i = n_compose-1; i < table->max_seq_len; i++) {
+    for (i = n_compose - 1; i < table->max_seq_len; i++) {
         row_stride = i + 1;
 
-        if (seq_index[i+1] - seq_index[i] > 0) {
-            seq = (guint16 *) bsearch (xkbengine->compose_buffer + 1,
-                    table->data + seq_index[i], (seq_index[i+1] - seq_index[i]) / row_stride,
-            sizeof (guint16) *  row_stride,
-            compare_seq);
+        if (seq_index[i + 1] - seq_index[i] > 0) {
+            seq = bsearch (xkbengine->compose_buffer + 1,
+                           table->data + seq_index[i],
+                           (seq_index[i + 1] - seq_index[i]) / row_stride,
+                           sizeof (guint16) *  row_stride,
+                           compare_seq);
 
-        if (seq) {
+            if (seq) {
                 if (i == n_compose - 1)
                     break;
                 else {
                     ibus_xkb_layout_engine_update_preedit_text (xkbengine);
-            g_debug ("yes\n");
-                  return TRUE;
+                    g_debug ("yes\n");
+                    return TRUE;
                 }
             }
         }
@@ -358,11 +367,55 @@ check_compact_table (IBusXkbLayoutEngine          *xkbengine,
         g_debug ("U+%04X\n", value);
         return TRUE;
     }
-
-    g_debug ("no\n");
-    return FALSE;
 }
 
+static gboolean
+no_sequence_matches (IBusXkbLayoutEngine *xkbengine,
+                     gint                 n_compose,
+                     guint                keyval,
+                     guint                keycode,
+                     guint                modifiers)
+{
+  gunichar ch;
+  
+    /* No compose sequences found, check first if we have a partial
+     * match pending.
+     */
+    if (xkbengine->tentative_match) {
+        gint len = xkbengine->tentative_match_len;
+        int i;
+        
+        ibus_xkb_layout_engine_commit_char (xkbengine,
+                                            xkbengine->tentative_match);
+        xkbengine->compose_buffer[0] = 0;
+      
+        for (i=0; i < n_compose - len - 1; i++) {
+            ibus_xkb_layout_engine_process_key_event (
+                    (IBusEngine *)xkbengine,
+                    xkbengine->compose_buffer[len + i],
+                    0, 0);
+	}
+
+        return ibus_xkb_layout_engine_process_key_event (
+                (IBusEngine *)xkbengine, keyval, keycode, modifiers);
+    }
+    else {
+        xkbengine->compose_buffer[0] = 0;
+        if (n_compose > 1) {
+            /* Invalid sequence */
+            // FIXME beep_window (event->window);
+	    return TRUE;
+	}
+  
+        ch = ibus_keyval_to_unicode (keyval);
+        if (ch != 0 && !g_unichar_iscntrl (ch)) {
+	    ibus_xkb_layout_engine_commit_char (xkbengine, ch);
+            return TRUE;
+	}
+        else
+	    return FALSE;
+    }
+}
 
 gboolean
 ibus_xkb_layout_engine_process_key_event (IBusEngine *engine,
@@ -565,9 +618,5 @@ ibus_xkb_layout_engine_process_key_event (IBusEngine *engine,
     }
 
     /* The current compose_buffer doesn't match anything */
-    /* FIXME
-    return no_sequence_matches (context_simple, n_compose, event);
-    */
-
-    return FALSE;
+    return no_sequence_matches (xkbengine, n_compose, keyval, keycode, modifiers);
 }
