@@ -2,6 +2,7 @@
 /* vim:set et sts=4: */
 #include "engine.h"
 #include <stdlib.h>
+#include <memory.h>
 /* TODO Add ibus_keyval_to_unicode and ibus_unicode_to_keyval on libibus */
 #include "ibuskeyuni.h"
 
@@ -25,16 +26,7 @@ struct _IBusXkbLayoutEngineClass {
     IBusEngineClass parent;
 };
 
-struct _GtkComposeTable GtkComposeTable;
 typedef struct _GtkComposeTableCompact GtkComposeTableCompact;
-
-struct _GtkComposeTable
-{
-    const guint16 *data;
-    gint max_seq_len;
-    gint n_seqs;
-};
-
 struct _GtkComposeTableCompact
 {
     const guint16 *data;
@@ -305,12 +297,12 @@ check_compact_table (IBusXkbLayoutEngine          *xkbengine,
     if (n_compose > table->max_seq_len)
         return FALSE;
 
-    g_debug ("check_compact_table(%d) [%04x, %04x, %04x, %04x]",
-        n_compose,
-        xkbengine->compose_buffer[0],
-        xkbengine->compose_buffer[1],
-        xkbengine->compose_buffer[2],
-        xkbengine->compose_buffer[3]);
+    g_debug ("check_compact_table(n_compose=%d) [%04x, %04x, %04x, %04x]",
+            n_compose,
+            xkbengine->compose_buffer[0],
+            xkbengine->compose_buffer[1],
+            xkbengine->compose_buffer[2],
+            xkbengine->compose_buffer[3]);
 
     seq_index = bsearch (xkbengine->compose_buffer,
                          table->data,
@@ -318,17 +310,17 @@ check_compact_table (IBusXkbLayoutEngine          *xkbengine,
                          sizeof (guint16) *  table->n_index_stride,
                          compare_seq_index);
 
-    if (!seq_index) {
+    if (seq_index == NULL) {
         g_debug ("compact: no\n");
         return FALSE;
     }
 
-    if (seq_index && n_compose == 1) {
+    if (n_compose == 1) {
         g_debug ("compact: yes\n");
         return TRUE;
     }
 
-    g_debug ("compact: %d ", *seq_index);
+    g_debug ("compact: %04x ", *seq_index);
     seq = NULL;
 
     for (i = n_compose - 1; i < table->max_seq_len; i++) {
@@ -338,8 +330,9 @@ check_compact_table (IBusXkbLayoutEngine          *xkbengine,
             seq = bsearch (xkbengine->compose_buffer + 1,
                            table->data + seq_index[i],
                            (seq_index[i + 1] - seq_index[i]) / row_stride,
-                           sizeof (guint16) *  row_stride,
+                           sizeof (guint16) * row_stride,
                            compare_seq);
+            g_debug ("seq = %p", seq);
 
             if (seq) {
                 if (i == n_compose - 1)
@@ -369,6 +362,164 @@ check_compact_table (IBusXkbLayoutEngine          *xkbengine,
     }
 }
 
+/* Checks if a keysym is a dead key. Dead key keysym values are defined in
+ * ../gdk/gdkkeysyms.h and the first is GDK_KEY_dead_grave. As X.Org is updated,
+ * more dead keys are added and we need to update the upper limit.
+ * Currently, the upper limit is GDK_KEY_dead_dasia+1. The +1 has to do with
+ * a temporary issue in the X.Org header files.
+ * In future versions it will be just the keysym (no +1).
+ */
+#define IS_DEAD_KEY(k) \
+      ((k) >= IBUS_dead_grave && (k) <= (IBUS_dead_dasia+1))
+
+/* This function receives a sequence of Unicode characters and tries to
+ * normalize it (NFC). We check for the case the the resulting string
+ * has length 1 (single character).
+ * NFC normalisation normally rearranges diacritic marks, unless these
+ * belong to the same Canonical Combining Class.
+ * If they belong to the same canonical combining class, we produce all
+ * permutations of the diacritic marks, then attempt to normalize.
+ */
+static gboolean
+check_normalize_nfc (gunichar* combination_buffer, gint n_compose)
+{
+    gunichar combination_buffer_temp[MAX_COMPOSE_LEN];
+    gchar *combination_utf8_temp = NULL;
+    gchar *nfc_temp = NULL;
+    gint n_combinations;
+    gunichar temp_swap;
+    gint i;
+
+    n_combinations = 1;
+
+    for (i = 1; i < n_compose; i++ )
+        n_combinations *= i;
+
+    /* Xorg reuses dead_tilde for the perispomeni diacritic mark.
+     * We check if base character belongs to Greek Unicode block,
+     * and if so, we replace tilde with perispomeni. */
+    if (combination_buffer[0] >= 0x390 && combination_buffer[0] <= 0x3FF) {
+        for (i = 1; i < n_compose; i++ )
+            if (combination_buffer[i] == 0x303)
+                combination_buffer[i] = 0x342;
+    }
+
+    memcpy (combination_buffer_temp, combination_buffer, MAX_COMPOSE_LEN * sizeof (gunichar) );
+
+    for (i = 0; i < n_combinations; i++ ) {
+        g_unicode_canonical_ordering (combination_buffer_temp, n_compose);
+        combination_utf8_temp = g_ucs4_to_utf8 (combination_buffer_temp, -1, NULL, NULL, NULL);
+        nfc_temp = g_utf8_normalize (combination_utf8_temp, -1, G_NORMALIZE_NFC);               
+
+        if (g_utf8_strlen (nfc_temp, -1) == 1) {
+            memcpy (combination_buffer, combination_buffer_temp, MAX_COMPOSE_LEN * sizeof (gunichar) );
+
+            g_free (combination_utf8_temp);
+            g_free (nfc_temp);
+
+            return TRUE;
+        }
+
+        g_free (combination_utf8_temp);
+        g_free (nfc_temp);
+
+        if (n_compose > 2) {
+            temp_swap = combination_buffer_temp[i % (n_compose - 1) + 1];
+            combination_buffer_temp[i % (n_compose - 1) + 1] = combination_buffer_temp[(i+1) % (n_compose - 1) + 1];
+            combination_buffer_temp[(i+1) % (n_compose - 1) + 1] = temp_swap;
+        }
+        else
+            break;
+    }
+
+    return FALSE;
+}
+
+static gboolean
+check_algorithmically (IBusXkbLayoutEngine *xkbengine,
+                       gint                n_compose)
+
+{
+    gint i;
+    gunichar combination_buffer[MAX_COMPOSE_LEN];
+    gchar *combination_utf8, *nfc;
+
+    if (n_compose >= MAX_COMPOSE_LEN)
+        return FALSE;
+
+    for (i = 0; i < n_compose && IS_DEAD_KEY (xkbengine->compose_buffer[i]); i++)
+        ;
+    if (i == n_compose)
+        return TRUE;
+
+    if (i > 0 && i == n_compose - 1) {
+        combination_buffer[0] = ibus_keyval_to_unicode (xkbengine->compose_buffer[i]);
+        combination_buffer[n_compose] = 0;
+        i--;
+        while (i >= 0) {
+        switch (xkbengine->compose_buffer[i]) {
+#define CASE(keysym, unicode) \
+        case IBUS_dead_##keysym: combination_buffer[i+1] = unicode; break
+        CASE (grave, 0x0300);
+        CASE (acute, 0x0301);
+        CASE (circumflex, 0x0302);
+        CASE (tilde, 0x0303);    /* Also used with perispomeni, 0x342. */
+        CASE (macron, 0x0304);
+        CASE (breve, 0x0306);
+        CASE (abovedot, 0x0307);
+        CASE (diaeresis, 0x0308);
+        CASE (hook, 0x0309);
+        CASE (abovering, 0x030A);
+        CASE (doubleacute, 0x030B);
+        CASE (caron, 0x030C);
+        CASE (abovecomma, 0x0313);         /* Equivalent to psili */
+        CASE (abovereversedcomma, 0x0314); /* Equivalent to dasia */
+        CASE (horn, 0x031B);    /* Legacy use for psili, 0x313 (or 0x343). */
+        CASE (belowdot, 0x0323);
+        CASE (cedilla, 0x0327);
+        CASE (ogonek, 0x0328);    /* Legacy use for dasia, 0x314.*/
+        CASE (iota, 0x0345);
+        CASE (voiced_sound, 0x3099);    /* Per Markus Kuhn keysyms.txt file. */
+        CASE (semivoiced_sound, 0x309A);    /* Per Markus Kuhn keysyms.txt file. */
+
+        /* The following cases are to be removed once xkeyboard-config,
+          * xorg are fully updated.
+          */
+            /* Workaround for typo in 1.4.x xserver-xorg */
+        case 0xfe66: combination_buffer[i+1] = 0x314; break;
+        /* CASE (dasia, 0x314); */
+        /* CASE (perispomeni, 0x342); */
+        /* CASE (psili, 0x343); */
+#undef CASE
+        default:
+            combination_buffer[i+1] = ibus_keyval_to_unicode (xkbengine->compose_buffer[i]);
+        }
+        i--;
+    }
+
+        /* If the buffer normalizes to a single character,
+         * then modify the order of combination_buffer accordingly, if necessary,
+         * and return TRUE.
+         */
+        if (check_normalize_nfc (combination_buffer, n_compose)) {
+            gunichar value;
+            combination_utf8 = g_ucs4_to_utf8 (combination_buffer, -1, NULL, NULL, NULL);
+            nfc = g_utf8_normalize (combination_utf8, -1, G_NORMALIZE_NFC);
+
+            value = g_utf8_get_char (nfc);
+            ibus_xkb_layout_engine_commit_char (xkbengine, value);
+            xkbengine->compose_buffer[0] = 0;
+
+            g_free (combination_utf8);
+            g_free (nfc);
+
+            return TRUE;
+        }
+    }
+
+    return FALSE;
+}
+
 static gboolean
 no_sequence_matches (IBusXkbLayoutEngine *xkbengine,
                      gint                 n_compose,
@@ -376,25 +527,25 @@ no_sequence_matches (IBusXkbLayoutEngine *xkbengine,
                      guint                keycode,
                      guint                modifiers)
 {
-  gunichar ch;
-  
+    gunichar ch;
+
     /* No compose sequences found, check first if we have a partial
      * match pending.
      */
     if (xkbengine->tentative_match) {
         gint len = xkbengine->tentative_match_len;
         int i;
-        
+
         ibus_xkb_layout_engine_commit_char (xkbengine,
                                             xkbengine->tentative_match);
         xkbengine->compose_buffer[0] = 0;
-      
+
         for (i=0; i < n_compose - len - 1; i++) {
             ibus_xkb_layout_engine_process_key_event (
                     (IBusEngine *)xkbengine,
                     xkbengine->compose_buffer[len + i],
                     0, 0);
-	}
+        }
 
         return ibus_xkb_layout_engine_process_key_event (
                 (IBusEngine *)xkbengine, keyval, keycode, modifiers);
@@ -404,16 +555,16 @@ no_sequence_matches (IBusXkbLayoutEngine *xkbengine,
         if (n_compose > 1) {
             /* Invalid sequence */
             // FIXME beep_window (event->window);
-	    return TRUE;
-	}
-  
+            return TRUE;
+        }
+
         ch = ibus_keyval_to_unicode (keyval);
         if (ch != 0 && !g_unichar_iscntrl (ch)) {
-	    ibus_xkb_layout_engine_commit_char (xkbengine, ch);
+            ibus_xkb_layout_engine_commit_char (xkbengine, ch);
             return TRUE;
-	}
+        }
         else
-	    return FALSE;
+            return FALSE;
     }
 }
 
@@ -611,10 +762,9 @@ ibus_xkb_layout_engine_process_key_event (IBusEngine *engine,
         // TODO CONT
         if (check_compact_table (xkbengine, &gtk_compose_table_compact, n_compose))
             return TRUE;
-        /* FIXME
-        if (check_algorithmically (context_simple, n_compose))
-        return TRUE;
-        */
+
+        if (check_algorithmically (xkbengine, n_compose))
+            return TRUE;
     }
 
     /* The current compose_buffer doesn't match anything */
