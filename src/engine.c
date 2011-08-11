@@ -3,8 +3,6 @@
 #include "engine.h"
 #include <stdlib.h>
 #include <memory.h>
-/* TODO Add ibus_keyval_to_unicode and ibus_unicode_to_keyval on libibus */
-#include "ibuskeyuni.h"
 
 #define MAX_COMPOSE_LEN 7
 
