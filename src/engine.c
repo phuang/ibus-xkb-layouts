@@ -74,8 +74,8 @@ static const guint16 gtk_compose_ignore[] = {
 
 /* functions prototype */
 static void     ibus_xkb_layout_engine_class_init       (IBusXkbLayoutEngineClass   *klass);
-static void     ibus_xkb_layout_engine_init             (IBusXkbLayoutEngine        *engine);
-static void     ibus_xkb_layout_engine_destroy          (IBusXkbLayoutEngine        *engine);
+static void     ibus_xkb_layout_engine_init             (IBusXkbLayoutEngine        *xkbengine);
+static void     ibus_xkb_layout_engine_destroy          (IBusXkbLayoutEngine        *xkbengine);
 static void     ibus_xkb_layout_engine_reset            (IBusEngine                 *engine);
 static gboolean ibus_xkb_layout_engine_process_key_event(IBusEngine                 *engine,
                                                          guint                       keyval,
@@ -101,14 +101,14 @@ ibus_xkb_layout_engine_class_init (IBusXkbLayoutEngineClass *klass)
 }
 
 static void
-ibus_xkb_layout_engine_init (IBusXkbLayoutEngine *xkb_layout)
+ibus_xkb_layout_engine_init (IBusXkbLayoutEngine *xkbengine)
 {
 }
 
 static void
-ibus_xkb_layout_engine_destroy (IBusXkbLayoutEngine *xkb_layout)
+ibus_xkb_layout_engine_destroy (IBusXkbLayoutEngine *xkbengine)
 {
-    ((IBusObjectClass *) ibus_xkb_layout_engine_parent_class)->destroy ((IBusObject *)xkb_layout);
+    ((IBusObjectClass *) ibus_xkb_layout_engine_parent_class)->destroy ((IBusObject *)xkbengine);
 }
 
 static void
